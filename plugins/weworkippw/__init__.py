@@ -26,7 +26,7 @@ class WeWorkIPPW(_PluginBase):
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.5.0"
+    plugin_version = "2.5.1"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -119,6 +119,55 @@ class WeWorkIPPW(_PluginBase):
                     return urljoin(page.url, qr_img_relative_url)
             page.wait_for_timeout(500)
         raise ValueError("未找到登录二维码图片")
+
+    def _is_login_success(self, page) -> bool:
+        success_selectors = [
+            'div.app_card_operate.js_show_ipConfig_dialog',
+            "//div[contains(@class, 'js_show_ipConfig_dialog')]//a[contains(@class, '_mod_card_operationLink')]",
+            '#_hmt_click > div.index_colRight > div > div.index_info > div > a',
+            '#_hmt_click > div.index_colLeft > div.index_greeting.index_explore_text > div:nth-child(1)',
+        ]
+        for selector in success_selectors:
+            try:
+                element = page.wait_for_selector(selector, timeout=1000)
+                if element:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _handle_mobile_confirm(self, page) -> bool:
+        try:
+            captcha_panel = page.wait_for_selector('.receive_captcha_panel', timeout=1000)
+        except Exception:
+            return False
+        if not captcha_panel:
+            return False
+        self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "检测到登录验证，请以 #123456 的格式回复验证码，两分钟后超时",userid=self._qr_send_users)
+        logger.info("检测到登录验证，进入验证流程")
+        wait_code_time = 0
+        while wait_code_time <= 120:
+            if self._code:
+                input_element = page.locator('.inner_input')
+                input_element.type(self._code)
+                confirm_button = page.wait_for_selector('.confirm_btn', timeout=5000)
+                confirm_button.click()
+                self._code = 0
+                page.wait_for_timeout(3000)
+                return self._is_login_success(page)
+            time.sleep(2)
+            wait_code_time += 2
+        raise ValueError("验证超时,终止本次登录")
+
+    def _wait_for_login_success(self, page, timeout: int = 90) -> bool:
+        logger.info(f"等待用户 {timeout} 秒内扫码登录企业微信")
+        for _ in range(timeout):
+            if self._is_login_success(page):
+                return True
+            if self._handle_mobile_confirm(page):
+                return True
+            page.wait_for_timeout(1000)
+        return False
 
     def init_plugin(self, config: dict = None):
         # 清空配置
@@ -468,42 +517,11 @@ class WeWorkIPPW(_PluginBase):
                 else:
                     logger.info("无法下载二维码图片：", response.status_code)
                 try:
-                    new_url = False
-                    def on_new_url(frame):
-                        if 'work.weixin.qq.com' in frame.url:
-                            nonlocal new_url
-                            new_url = True
-                    page.on('framenavigated', on_new_url)
-                    wait_time = 0
-                    while not new_url:
-                        page.wait_for_timeout(1000)
-                        wait_time += 1
-                        if wait_time > 60:
-                            raise ValueError("等待扫描超时")
-                    if 'mobile_confirm' in page.url:
-                        new_url = False
-                        self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "检测到登录验证，请以 #123456 的格式回复验证码，两分钟后超时",userid=self._qr_send_users)
-                        logger.info("检测到登录验证，进入验证流程")
-                        wait_code_time = 0
-                        while 'mobile_confirm' in page.url:
-                            self._code = 0
-                            wait_time = 0
-                            while self._code == 0:
-                                time.sleep(2)
-                                wait_code_time += 2
-                                if wait_code_time > 120:
-                                    raise ValueError("验证超时,终止本次登录")
-                            input_element = page.locator('.inner_input')
-                            input_element.type(self._code)
-                            while not new_url:
-                                page.wait_for_timeout(1000)
-                                wait_time += 1
-                                if wait_time > 5:
-                                    break
-                            if 'mobile_confirm' in page.url:
-                                self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "登录失败,请检查验证码并重新发送",userid=self._qr_send_users)
-                                logger.info("登录失败,请检查验证码并重新发送")
-                    cookies = self._context_cookies(context, page.url)
+                    if not self._wait_for_login_success(page):
+                        raise ValueError("等待扫描超时")
+                    cookies = self._context_cookies(context)
+                    if not cookies:
+                        raise ValueError("登录成功后未从浏览器上下文读取到cookie")
                     cookies2 = ';'.join([f"{cookie['name']}={cookie['value']}" for cookie in cookies])
                     self._cookie_from_CC = self.parse_cookie_header(cookies2)
                     self._cookie_valid = True

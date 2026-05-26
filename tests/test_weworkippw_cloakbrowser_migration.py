@@ -18,6 +18,7 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
         self.assertNotIn("sync_playwright", self.source)
         self.assertNotIn(".chromium.launch", self.source)
         self.assertNotIn("frame_locator(", self.source)
+        self.assertNotIn("framenavigated", self.source)
 
     def test_keeps_browser_launch_in_single_helper(self):
         self.assertIn("def _launch_browser_context", self.source)
@@ -29,10 +30,16 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
 
         self.assertEqual(metadata["name"], "企微配置IP Cloak版")
         self.assertEqual(metadata["author"], "zhiluop")
-        self.assertEqual(metadata["version"], "2.5.0")
+        self.assertEqual(metadata["version"], "2.5.1")
         self.assertIn("CloakBrowser", metadata["description"])
         self.assertIn('plugin_name = "企微配置IP Cloak版"', self.source)
         self.assertIn('plugin_author = "zhiluop"', self.source)
+
+    def test_login_polls_success_state_and_reads_context_cookies(self):
+        self.assertIn("def _wait_for_login_success", self.source)
+        self.assertIn("def _is_login_success", self.source)
+        self.assertIn("cookies = self._context_cookies(context)", self.source)
+        self.assertIn("登录成功后未从浏览器上下文读取到cookie", self.source)
 
 
 if __name__ == "__main__":
