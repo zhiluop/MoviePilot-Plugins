@@ -16,17 +16,17 @@ from app.plugins import _PluginBase
 from app.core.config import settings
 from app.helper.cookiecloud import CookieCloudHelper
 
-from playwright.sync_api import sync_playwright
+from cloakbrowser import launch_context
 
 class WeWorkIPPW(_PluginBase):
     # 插件名称
     plugin_name = "企微配置IPpw版"
     # 插件描述
-    plugin_desc = "!!docker用户用这个版本!!定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。"
+    plugin_desc = "定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。使用MoviePilot V2 CloakBrowser内核运行。"
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.4.2"
+    plugin_version = "2.5.0"
     # 插件作者
     plugin_author = "suraxiuxiu"
     # 作者主页
@@ -84,6 +84,41 @@ class WeWorkIPPW(_PluginBase):
     _driver = None
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
+
+    @staticmethod
+    def _launch_browser_context(headless: bool = True):
+        context = launch_context(headless=headless, args=["--lang=zh-CN"])
+        context.set_extra_http_headers({
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.1"
+        })
+        return context
+
+    @staticmethod
+    def _context_cookies(context, url: str = None):
+        if url:
+            try:
+                return context.cookies(url)
+            except TypeError:
+                pass
+        return context.cookies()
+
+    @staticmethod
+    def _get_login_qr_url(page):
+        page.wait_for_selector("iframe", timeout=5000)
+        iframe_element = page.query_selector('iframe[src*="login_qrcode"]') or page.query_selector("iframe")
+        if not iframe_element:
+            raise ValueError("未找到登录二维码iframe")
+        frame = iframe_element.content_frame()
+        if not frame:
+            raise ValueError("无法读取登录二维码iframe内容")
+        for _ in range(10):
+            qr_img_element = frame.query_selector(".qrcode_login_img")
+            if qr_img_element:
+                qr_img_relative_url = qr_img_element.get_attribute("src")
+                if qr_img_relative_url:
+                    return urljoin(page.url, qr_img_relative_url)
+            page.wait_for_timeout(500)
+        raise ValueError("未找到登录二维码图片")
 
     def init_plugin(self, config: dict = None):
         # 清空配置
@@ -256,95 +291,91 @@ class WeWorkIPPW(_PluginBase):
         if not self.check_connect():
             logger.error("网络连接失败,跳过本次更改IP")
             return
-        try:    
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context()
-                cookie = self.get_cookie()
-                if cookie == '':
-                    logger.error('cookie为空,请检查CC配置和插件手动填写项')
-                    browser.close()
-                    self._cookie_valid = False
-                    return
-                context.add_cookies(cookie)
-                page = context.new_page()
-                page.goto(self._urls[0])
-                time.sleep(1)
-                login = page.locator('.login_stage_title_text')
-                # 检查登录元素是否可见
-                if login.is_visible():
-                    logger.info("cookie失效,请重新获取")
-                    self._cookie_valid = False
-                    browser.close()
-                    return
+        context = None
+        try:
+            context = self._launch_browser_context(headless=True)
+            cookie = self.get_cookie()
+            if cookie == '':
+                logger.error('cookie为空,请检查CC配置和插件手动填写项')
+                self._cookie_valid = False
+                return
+            context.add_cookies(cookie)
+            page = context.new_page()
+            page.goto(self._urls[0])
+            time.sleep(1)
+            login = page.locator('.login_stage_title_text')
+            # 检查登录元素是否可见
+            if login.is_visible():
+                logger.info("cookie失效,请重新获取")
+                self._cookie_valid = False
+                return
+            else:
+                logger.info("加载企微管理界面成功")
+                self._cookie_valid = True
+            for index, url in enumerate(self._urls):
+                logger.info(f"正在更改第{index+1}个应用的可信IP")
+                page.goto(url)
+                page.wait_for_selector('div.app_card_operate.js_show_ipConfig_dialog')
+                page.locator('div.app_card_operate.js_show_ipConfig_dialog').click()
+                page.wait_for_selector('textarea.js_ipConfig_textarea')
+                input_area = page.locator('textarea.js_ipConfig_textarea')
+                confirm = page.locator('.js_ipConfig_confirmBtn')
+                existing_ip = input_area.input_value()
+                if self._overwrite:
+                    input_area.fill(self._current_ip_address)
                 else:
-                    logger.info("加载企微管理界面成功")
-                    self._cookie_valid = True
-                for index, url in enumerate(self._urls):           
-                    logger.info(f"正在更改第{index+1}个应用的可信IP")
-                    page.goto(url)
-                    page.wait_for_selector('div.app_card_operate.js_show_ipConfig_dialog')
-                    page.locator('div.app_card_operate.js_show_ipConfig_dialog').click()
-                    page.wait_for_selector('textarea.js_ipConfig_textarea')
-                    input_area = page.locator('textarea.js_ipConfig_textarea')
-                    confirm = page.locator('.js_ipConfig_confirmBtn')
-                    existing_ip = input_area.input_value()
-                    if self._overwrite:
-                        input_area.fill(self._current_ip_address)
-                    else:
-                        input_area.fill(f'{existing_ip};{self._current_ip_address}')
-                    confirm.click()
-                    time.sleep(1)
-                    logger.info(f"更改第{index+1}个应用的可信IP成功")
-                self._ip_changed = True
-                browser.close() 
+                    input_area.fill(f'{existing_ip};{self._current_ip_address}')
+                confirm.click()
+                time.sleep(1)
+                logger.info(f"更改第{index+1}个应用的可信IP成功")
+            self._ip_changed = True
         except Exception as e:
             logger.error(f"更改可信IP失败:{e}")
+        finally:
+            if context:
+                context.close()
     
     def refresh_cookie(self,_login=True):
         logger.info("开始刷新企业微信缓存")
         if not self.check_connect():
             logger.error("网络连接失败,跳过本次缓存保活")
             return
-        try:    
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context()
-                cookie = self.get_cookie()
-                if cookie == '' or cookie == ['']:
-                    logger.error('cookie为空,请检查CC配置和插件手动填写项')
-                    browser.close()
-                    self._cookie_valid = False
-                    if self._schedule_login:
-                        if self._scheduler.get_job("refresh_cookie"):
-                            self._scheduler.remove_job("refresh_cookie")
-                        if not self._scheduler.get_job("wwlogin") and _login:
-                            self.create_login_job()
-                    else:
-                        if not self._scheduler.get_job("refresh_cookie"):
-                            self.create_refresh_job()
-                    return
-                context.add_cookies(cookie)
-                page = context.new_page()
-                page.goto(self._urls[0])
-                time.sleep(2)
-                login = page.locator('.login_stage_title_text')
-            # 检查登录元素是否可见
-                if login.is_visible():
-                    logger.info("cookie失效,请重新获取")
-                    self._cookie_valid = False
-                    if self._schedule_login:
-                        if self._scheduler.get_job("refresh_cookie"):
-                            self._scheduler.remove_job("refresh_cookie")
-                        if not self._scheduler.get_job("wwlogin") and _login:
-                            self.create_login_job()
-                    else:
-                        if not self._scheduler.get_job("refresh_cookie"):
-                            self.create_refresh_job()
+        context = None
+        try:
+            context = self._launch_browser_context(headless=True)
+            cookie = self.get_cookie()
+            if cookie == '' or cookie == ['']:
+                logger.error('cookie为空,请检查CC配置和插件手动填写项')
+                self._cookie_valid = False
+                if self._schedule_login:
+                    if self._scheduler.get_job("refresh_cookie"):
+                        self._scheduler.remove_job("refresh_cookie")
+                    if not self._scheduler.get_job("wwlogin") and _login:
+                        self.create_login_job()
                 else:
-                    logger.info("cookie有效校验成功")
-                    self._cookie_valid = True
-                browser.close()
+                    if not self._scheduler.get_job("refresh_cookie"):
+                        self.create_refresh_job()
+                return
+            context.add_cookies(cookie)
+            page = context.new_page()
+            page.goto(self._urls[0])
+            time.sleep(2)
+            login = page.locator('.login_stage_title_text')
+            # 检查登录元素是否可见
+            if login.is_visible():
+                logger.info("cookie失效,请重新获取")
+                self._cookie_valid = False
+                if self._schedule_login:
+                    if self._scheduler.get_job("refresh_cookie"):
+                        self._scheduler.remove_job("refresh_cookie")
+                    if not self._scheduler.get_job("wwlogin") and _login:
+                        self.create_login_job()
+                else:
+                    if not self._scheduler.get_job("refresh_cookie"):
+                        self.create_refresh_job()
+            else:
+                logger.info("cookie有效校验成功")
+                self._cookie_valid = True
             self.__update_config()
         except Exception as e:
                 logger.error(f"cookie校验失败:{e}") 
@@ -353,6 +384,9 @@ class WeWorkIPPW(_PluginBase):
                 else:
                     self._cookie_valid = False
                 self.__update_config()   
+        finally:
+            if context:
+                context.close()
     
     def parse_cookie_header(self,cookie_header):
         try:
@@ -417,88 +451,84 @@ class WeWorkIPPW(_PluginBase):
             if self._scheduler.get_job("wwlogin"):
                 self._scheduler.remove_job("wwlogin")
             return
+        context = None
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                self._driver = browser
-                context = browser.new_context()
+            context = self._launch_browser_context(headless=True)
+            self._driver = context
+            try:
+                page = context.new_page()
+                page.goto(self._urls[0])
+                absolute_url = self._get_login_qr_url(page)
+                self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "点击扫描二维码登录企业微信",image=absolute_url,link=absolute_url,userid=self._qr_send_users)
+                response = requests.get(absolute_url)
+                if response.status_code == 200:
+                    with open(self.qr_path, "wb") as file:
+                        file.write(response.content)
+                    logger.info("打开插件详情扫描二维码登录企业微信")
+                else:
+                    logger.info("无法下载二维码图片：", response.status_code)
                 try:
-                    page = context.new_page()
-                    page.goto(self._urls[0])
-                    iframe_element = page.frame_locator('iframe[src*="login_qrcode"]')
-                    qr_img_element = iframe_element.locator('.qrcode_login_img')
-                    qr_img_element.wait_for(state="visible", timeout=2000)
-                    qr_img_relative_url = qr_img_element.get_attribute('src')
-                    base_url = page.url
-                    absolute_url = urljoin(base_url, qr_img_relative_url)
-                    self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "点击扫描二维码登录企业微信",image=absolute_url,link=absolute_url,userid=self._qr_send_users)
-                    response = requests.get(absolute_url)
-                    if response.status_code == 200:
-                        with open(self.qr_path, "wb") as file:
-                            file.write(response.content)
-                        logger.info("打开插件详情扫描二维码登录企业微信")
-                    else:
-                        logger.info("无法下载二维码图片：", response.status_code)
-                    try:
+                    new_url = False
+                    def on_new_url(frame):
+                        if 'work.weixin.qq.com' in frame.url:
+                            nonlocal new_url
+                            new_url = True
+                    page.on('framenavigated', on_new_url)
+                    wait_time = 0
+                    while not new_url:
+                        page.wait_for_timeout(1000)
+                        wait_time += 1
+                        if wait_time > 60:
+                            raise ValueError("等待扫描超时")
+                    if 'mobile_confirm' in page.url:
                         new_url = False
-                        def on_new_url(frame):
-                            if 'work.weixin.qq.com' in frame.url:
-                                nonlocal new_url
-                                new_url = True
-                        page.on('framenavigated', on_new_url)
-                        wait_time = 0
-                        while not new_url:
-                            page.wait_for_timeout(1000)
-                            wait_time += 1
-                            if wait_time > 60:
-                                raise ValueError("等待扫描超时")
-                        if 'mobile_confirm' in page.url:
-                            new_url = False
-                            self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "检测到登录验证，请以 #123456 的格式回复验证码，两分钟后超时",userid=self._qr_send_users)
-                            logger.info("检测到登录验证，进入验证流程")
-                            wait_code_time = 0
-                            while 'mobile_confirm' in page.url:
-                                self._code = 0
-                                wait_time = 0
-                                while self._code == 0:
-                                    time.sleep(2)
-                                    wait_code_time += 2
-                                    if wait_code_time > 120:
-                                        raise ValueError("验证超时,终止本次登录")
-                                input_element = page.locator('.inner_input')
-                                input_element.type(self._code)
-                                while not new_url:
-                                    page.wait_for_timeout(1000)
-                                    wait_time += 1
-                                    if wait_time > 5:
-                                        break                          
-                                if 'mobile_confirm' in page.url:
-                                    self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "登录失败,请检查验证码并重新发送",userid=self._qr_send_users)
-                                    logger.info("登录失败,请检查验证码并重新发送")
-                        cookies = context.cookies()
-                        cookies2 = ';'.join([f"{cookie['name']}={cookie['value']}" for cookie in cookies])
-                        self._cookie_from_CC = self.parse_cookie_header(cookies2)
-                        self._cookie_valid = True
-                        self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "登录企业微信成功",userid=self._qr_send_users)
-                        logger.info("登录企业微信成功")
-                        if not self._scheduler.get_job("refresh_cookie"):
-                            self.create_refresh_job()
-                        if self._scheduler.get_job("wwlogin"):
-                            self._scheduler.remove_job("wwlogin")
-                    except Exception as e:
-                        logger.error(f"登录超时:{e}")
-                        self.login_fail()
+                        self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "检测到登录验证，请以 #123456 的格式回复验证码，两分钟后超时",userid=self._qr_send_users)
+                        logger.info("检测到登录验证，进入验证流程")
+                        wait_code_time = 0
+                        while 'mobile_confirm' in page.url:
+                            self._code = 0
+                            wait_time = 0
+                            while self._code == 0:
+                                time.sleep(2)
+                                wait_code_time += 2
+                                if wait_code_time > 120:
+                                    raise ValueError("验证超时,终止本次登录")
+                            input_element = page.locator('.inner_input')
+                            input_element.type(self._code)
+                            while not new_url:
+                                page.wait_for_timeout(1000)
+                                wait_time += 1
+                                if wait_time > 5:
+                                    break
+                            if 'mobile_confirm' in page.url:
+                                self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "登录失败,请检查验证码并重新发送",userid=self._qr_send_users)
+                                logger.info("登录失败,请检查验证码并重新发送")
+                    cookies = self._context_cookies(context, page.url)
+                    cookies2 = ';'.join([f"{cookie['name']}={cookie['value']}" for cookie in cookies])
+                    self._cookie_from_CC = self.parse_cookie_header(cookies2)
+                    self._cookie_valid = True
+                    self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "登录企业微信成功",userid=self._qr_send_users)
+                    logger.info("登录企业微信成功")
+                    if not self._scheduler.get_job("refresh_cookie"):
+                        self.create_refresh_job()
+                    if self._scheduler.get_job("wwlogin"):
+                        self._scheduler.remove_job("wwlogin")
                 except Exception as e:
-                    logger.error(f"登录失败:{e}")
+                    logger.error(f"登录超时:{e}")
                     self.login_fail()
-                browser.close()
-                self._driver = None
+            except Exception as e:
+                logger.error(f"登录失败:{e}")
+                self.login_fail()
             self.__update_config()
             if os.path.exists(self.qr_path):
                 os.remove(self.qr_path)
         except Exception as e:
                 logger.error(f"登录失败:{e}")
                 self.login_fail()
+        finally:
+            if context:
+                context.close()
+            self._driver = None
     
     def create_refresh_job(self):
         logger.info("创建定时刷新企业微信缓存任务")
