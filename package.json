@@ -24,12 +24,12 @@
         "v2": true
     },
     "WeWorkIPPW": {
-        "name": "企微配置IPpw版",
-        "description": "定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。使用MoviePilot V2 CloakBrowser内核运行。",
+        "name": "企微配置IP Cloak版",
+        "description": "定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。适配MoviePilot V2 CloakBrowser内核。",
         "labels": "消息通知",
         "version": "2.5.0",
         "icon": "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true",
-        "author": "suraxiuxiu",
+        "author": "zhiluop",
         "level": 2,
         "history": {
             "v2.5.0": "适配MoviePilot V2 CloakBrowser浏览器内核，移除直接Playwright Chromium启动依赖。",

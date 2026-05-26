@@ -20,17 +20,17 @@ from cloakbrowser import launch_context
 
 class WeWorkIPPW(_PluginBase):
     # 插件名称
-    plugin_name = "企微配置IPpw版"
+    plugin_name = "企微配置IP Cloak版"
     # 插件描述
-    plugin_desc = "定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。使用MoviePilot V2 CloakBrowser内核运行。"
+    plugin_desc = "定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。适配MoviePilot V2 CloakBrowser内核。"
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
     plugin_version = "2.5.0"
     # 插件作者
-    plugin_author = "suraxiuxiu"
+    plugin_author = "zhiluop"
     # 作者主页
-    author_url = "https://github.com/suraxiuxiu/MoviePilot-Plugins"
+    author_url = "https://github.com/zhiluop/MoviePilot-Plugins"
     # 插件配置项ID前缀
     plugin_config_prefix = "weworkippw_"
     # 加载顺序
