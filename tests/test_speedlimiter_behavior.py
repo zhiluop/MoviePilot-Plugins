@@ -43,6 +43,9 @@ def _install_app_stubs():
             return {}
 
     class MediaServerHelper:
+        def get_configs(self, include_disabled=False):
+            return {}
+
         def get_services(self, type_filter=None, name_filters=None):
             return {}
 
@@ -63,17 +66,23 @@ def _install_app_stubs():
         WebhookMessage = "webhook.message"
 
     class Logger:
+        records = []
+
+        @classmethod
+        def clear(cls):
+            cls.records = []
+
         def info(self, *args, **kwargs):
-            pass
+            self.records.append(("info", args, kwargs))
 
         def warning(self, *args, **kwargs):
-            pass
+            self.records.append(("warning", args, kwargs))
 
         def error(self, *args, **kwargs):
-            pass
+            self.records.append(("error", args, kwargs))
 
         def debug(self, *args, **kwargs):
-            pass
+            self.records.append(("debug", args, kwargs))
 
     class PluginBase:
         def post_message(self, *args, **kwargs):
@@ -104,15 +113,57 @@ def _install_app_stubs():
         "app.plugins": plugins,
     }
     sys.modules.update(modules)
+    return Logger
 
 
 def _load_plugin():
-    _install_app_stubs()
+    logger_class = _install_app_stubs()
     spec = importlib.util.spec_from_file_location("speedlimiter_plugin", PLUGIN_FILE)
     module = importlib.util.module_from_spec(spec)
     sys.modules["speedlimiter_plugin"] = module
     spec.loader.exec_module(module)
+    module._test_logger_class = logger_class
     return module
+
+
+class FakeDownloader:
+    def __init__(self, download_limit=2048, upload_limit=0):
+        self.download_limit = download_limit
+        self.upload_limit = upload_limit
+        self.calls = []
+
+    def get_speed_limit(self):
+        return self.download_limit, self.upload_limit
+
+    def set_speed_limit(self, download_limit=None, upload_limit=None):
+        self.calls.append({"download_limit": download_limit, "upload_limit": upload_limit})
+        self.download_limit = download_limit
+        self.upload_limit = upload_limit
+        return True
+
+
+class FakeTransmissionDownloader(FakeDownloader):
+    def __init__(self, download_limit=2048, upload_limit=0, download_enabled=False):
+        super().__init__(download_limit=download_limit, upload_limit=upload_limit)
+        self.trc = self
+        self.download_enabled = download_enabled
+
+    def get_session(self):
+        return {
+            "speed_limit_down": self.download_limit,
+            "speed_limit_down_enabled": self.download_enabled,
+        }
+
+
+def _plugin_with_services(module, services):
+    class TestSpeedLimiter(module.SpeedLimiter):
+        @property
+        def service_infos(self):
+            return services
+
+    plugin = TestSpeedLimiter()
+    plugin._downloader = list(services)
+    return plugin
 
 
 class SpeedLimiterBehaviorTests(unittest.TestCase):
@@ -183,6 +234,81 @@ class SpeedLimiterBehaviorTests(unittest.TestCase):
         plugin.init_plugin({"bandwidth": "10"})
 
         self.assertEqual(plugin._SpeedLimiter__calc_limit(12000000), 0)
+
+    def test_no_play_state_text_uses_internal_or_no_playback_language(self):
+        plugin = self.module.SpeedLimiter()
+
+        form, defaults = plugin.get_form()
+        form_text = json.dumps(form, ensure_ascii=False)
+
+        self.assertIn("公网播放上传限速", form_text)
+        self.assertIn("内网或未观看上传限速", form_text)
+        self.assertNotIn("无公网播放", form_text)
+        self.assertNotIn("play_down_speed", defaults)
+        self.assertNotIn("noplay_down_speed", defaults)
+
+    def test_download_limit_is_preserved_when_setting_upload_limits(self):
+        first = FakeDownloader(download_limit=2048)
+        second = FakeDownloader(download_limit=4096)
+        services = {
+            "qb": self.module.ServiceInfo(name="qb", instance=first, type="qbittorrent"),
+            "tr": self.module.ServiceInfo(name="tr", instance=second, type="transmission"),
+        }
+        plugin = _plugin_with_services(self.module, services)
+        plugin._notify = False
+
+        plugin._SpeedLimiter__set_limiter("公网播放", 500)
+
+        self.assertEqual(first.calls, [{"download_limit": 2048, "upload_limit": 500}])
+        self.assertEqual(second.calls, [{"download_limit": 4096, "upload_limit": 500}])
+
+    def test_disabled_transmission_download_limit_stays_disabled(self):
+        plugin = self.module.SpeedLimiter()
+        downloader = FakeTransmissionDownloader(download_limit=4096, download_enabled=False)
+
+        limit = plugin._SpeedLimiter__current_download_limit(downloader, "transmission")
+
+        self.assertEqual(limit, 0)
+
+    def test_limiter_notification_is_aggregated_for_multiple_downloaders(self):
+        first = FakeDownloader(download_limit=2048)
+        second = FakeDownloader(download_limit=4096)
+        services = {
+            "qb": self.module.ServiceInfo(name="qb", instance=first, type="qbittorrent"),
+            "tr": self.module.ServiceInfo(name="tr", instance=second, type="transmission"),
+        }
+        plugin = _plugin_with_services(self.module, services)
+        plugin._notify = True
+
+        plugin._SpeedLimiter__set_limiter("公网播放", 500)
+
+        messages = getattr(plugin, "_posted_messages", [])
+        self.assertEqual(len(messages), 1)
+        text = messages[0][1]["text"]
+        self.assertIn("qb(qbittorrent)：上传 500 KB/s，下载保持 2048 KB/s", text)
+        self.assertIn("tr(transmission)：上传 500 KB/s，下载保持 4096 KB/s", text)
+
+    def test_limiter_writes_logs_for_state_changes(self):
+        downloader = FakeDownloader(download_limit=2048)
+        plugin = _plugin_with_services(self.module, {
+            "qb": self.module.ServiceInfo(name="qb", instance=downloader, type="qbittorrent")
+        })
+        plugin._notify = False
+        self.module._test_logger_class.clear()
+
+        plugin._SpeedLimiter__set_limiter("公网播放", 500)
+
+        messages = [record[1][0] for record in self.module._test_logger_class.records if record[0] == "info"]
+        self.assertTrue(any("播放限速状态切换：公网播放" in message for message in messages))
+
+    def test_init_warns_when_enabled_without_any_upload_limit(self):
+        plugin = self.module.SpeedLimiter()
+        self.module._test_logger_class.clear()
+
+        plugin.init_plugin({"enabled": True})
+
+        messages = [record[1][0] for record in self.module._test_logger_class.records if record[0] == "warning"]
+        self.assertTrue(any("已启用但未配置任何上传限速" in message for message in messages))
 
 
 if __name__ == "__main__":

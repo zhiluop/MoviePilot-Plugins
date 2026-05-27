@@ -15,11 +15,11 @@ class SpeedLimiter(_PluginBase):
     # 插件名称
     plugin_name = "播放限速"
     # 插件描述
-    plugin_desc = "公网播放媒体库视频时，自动对下载器进行限速。"
+    plugin_desc = "公网播放媒体库视频时，自动对下载器进行上传限速。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/zhiluop/MoviePilot-Plugins/main/icons/micon.png"
     # 插件版本
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -52,9 +52,7 @@ class SpeedLimiter(_PluginBase):
         self._downloader: List[str] = []
         self._mediaserver: List[str] = []
         self._play_up_speed: float = 0
-        self._play_down_speed: float = 0
         self._noplay_up_speed: float = 0
-        self._noplay_down_speed: float = 0
         self._bandwidth: float = 0
         self._allocation_ratio: str = ""
         self._auto_limit: bool = False
@@ -72,9 +70,7 @@ class SpeedLimiter(_PluginBase):
         self._downloader = config.get("downloader") or []
         self._mediaserver = config.get("mediaserver") or []
         self._play_up_speed = self.__to_float(config.get("play_up_speed"))
-        self._play_down_speed = self.__to_float(config.get("play_down_speed"))
         self._noplay_up_speed = self.__to_float(config.get("noplay_up_speed"))
-        self._noplay_down_speed = self.__to_float(config.get("noplay_down_speed"))
         self._allocation_ratio = config.get("allocation_ratio") or ""
         self._exclude_path = config.get("exclude_path") or ""
         self._unlimited_ips = {
@@ -88,11 +84,19 @@ class SpeedLimiter(_PluginBase):
         self._limit_enabled = bool(
             self._auto_limit
             or self._play_up_speed
-            or self._play_down_speed
             or self._noplay_up_speed
-            or self._noplay_down_speed
         )
         self._current_state = ""
+        logger.info(
+            "播放限速配置已加载："
+            f"启用={self._enabled}，公网播放上传限速={self._play_up_speed} KB/s，"
+            f"内网或未观看上传限速={self._noplay_up_speed} KB/s，"
+            f"智能上行带宽={self._bandwidth / 1000000:g} Mbps，"
+            f"下载器={','.join(self._downloader) or '未选择'}，"
+            f"媒体服务器={','.join(self._mediaserver) or '全部'}"
+        )
+        if self._enabled and not self._limit_enabled:
+            logger.warning("播放限速已启用但未配置任何上传限速或智能上行带宽，检查服务不会启动")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -233,37 +237,9 @@ class SpeedLimiter(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "play_down_speed",
-                                            "label": "公网播放下载限速",
-                                            "placeholder": "KB/s，0 为不限",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
                                             "model": "noplay_up_speed",
-                                            "label": "无公网播放上传限速",
-                                            "placeholder": "KB/s，0 为不限",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "noplay_down_speed",
-                                            "label": "无公网播放下载限速",
-                                            "placeholder": "KB/s，0 为不限",
+                                            "label": "内网或未观看上传限速",
+                                            "placeholder": "KB/s，0 为解除上传限速",
                                         },
                                     }
                                 ],
@@ -372,9 +348,7 @@ class SpeedLimiter(_PluginBase):
             "downloader": [],
             "mediaserver": [],
             "play_up_speed": None,
-            "play_down_speed": None,
             "noplay_up_speed": None,
-            "noplay_down_speed": None,
             "bandwidth": None,
             "allocation_ratio": "",
             "ipv4": "",
@@ -420,9 +394,11 @@ class SpeedLimiter(_PluginBase):
         total_bit_rate = self.__collect_public_video_bitrate()
         if total_bit_rate:
             upload_limit = self.__calc_limit(total_bit_rate) if self._auto_limit else self._play_up_speed
-            self.__set_limiter("公网播放", upload_limit, self._play_down_speed)
+            logger.info(f"播放限速检查：检测到公网播放，总视频码率 {total_bit_rate} bps，准备设置上传限速 {upload_limit} KB/s")
+            self.__set_limiter("公网播放", upload_limit)
         else:
-            self.__set_limiter("无公网播放", self._noplay_up_speed, self._noplay_down_speed)
+            logger.info(f"播放限速检查：当前为内网播放或未观看，准备恢复上传限速 {self._noplay_up_speed} KB/s")
+            self.__set_limiter("内网或未观看", self._noplay_up_speed)
 
     def __collect_public_video_bitrate(self) -> int:
         total_bit_rate = 0
@@ -510,28 +486,75 @@ class SpeedLimiter(_PluginBase):
         limit = (self._bandwidth - total_bit_rate) / 8 / 1024
         return round(max(limit, 0), 2)
 
-    def __set_limiter(self, limit_type: str, upload_limit: float, download_limit: float):
+    def __set_limiter(self, limit_type: str, upload_limit: float):
         services = self.service_infos
         if not services:
             return
 
         upload_limits = self.__allocated_upload_limits(upload_limit, len(services))
-        state = f"{limit_type}|U:{upload_limits}|D:{download_limit}|S:{','.join(services)}"
+        download_limits = [
+            self.__current_download_limit(service.instance, service.type)
+            for service in services.values()
+        ]
+        state = f"{limit_type}|U:{upload_limits}|D:{download_limits}|S:{','.join(services)}"
         if self._current_state == state:
+            logger.info(f"播放限速状态未变化：{limit_type}，{self.__format_limit_lines(services, upload_limits, download_limits)}")
             return
         self._current_state = state
 
+        results = []
         for index, (service_name, service) in enumerate(services.items()):
             service_upload_limit = upload_limits[index]
-            service_download_limit = int(download_limit)
+            service_download_limit = download_limits[index]
             try:
-                service.instance.set_speed_limit(
+                success = service.instance.set_speed_limit(
                     download_limit=service_download_limit,
                     upload_limit=service_upload_limit,
                 )
-                self.__notify_limiter(service_name, service.type, limit_type, service_upload_limit, service_download_limit)
+                results.append({
+                    "name": service_name,
+                    "type": service.type,
+                    "upload_limit": service_upload_limit,
+                    "download_limit": service_download_limit,
+                    "success": bool(success),
+                })
             except Exception as err:
                 logger.error(f"设置下载器 {service_name} 限速失败：{err}")
+                results.append({
+                    "name": service_name,
+                    "type": service.type,
+                    "upload_limit": service_upload_limit,
+                    "download_limit": service_download_limit,
+                    "success": False,
+                })
+
+        logger.info(f"播放限速状态切换：{limit_type}；{self.__format_result_lines(results)}")
+        self.__notify_limiter(limit_type, results)
+
+    @staticmethod
+    def __current_download_limit(instance: Any, service_type: str = None) -> int:
+        if str(service_type or "").lower() == "transmission":
+            try:
+                session = instance.trc.get_session()
+                if session and not session.get("speed_limit_down_enabled"):
+                    return 0
+            except Exception:
+                pass
+
+        getter = getattr(instance, "get_speed_limit", None)
+        if not callable(getter):
+            return 0
+        try:
+            limits = getter()
+        except Exception as err:
+            logger.warning(f"读取下载器当前限速失败，将下载限速按不限速处理：{err}")
+            return 0
+        if not limits:
+            return 0
+        try:
+            return int(float(limits[0] or 0))
+        except (TypeError, ValueError, IndexError):
+            return 0
 
     def __allocated_upload_limits(self, upload_limit: float, count: int) -> List[int]:
         if count <= 0:
@@ -558,25 +581,44 @@ class SpeedLimiter(_PluginBase):
             return []
         return ratios if len(ratios) == count and all(ratio > 0 for ratio in ratios) else []
 
-    def __notify_limiter(
-            self,
-            service_name: str,
-            service_type: str,
-            limit_type: str,
-            upload_limit: int,
-            download_limit: int,
-    ):
+    def __notify_limiter(self, limit_type: str, results: List[Dict[str, Any]]):
         if not self._notify:
             return
-        if upload_limit or download_limit:
-            text = f"{service_name}({service_type}) 开始{limit_type}限速\n上传：{upload_limit or '不限速'} KB/s\n下载：{download_limit or '不限速'} KB/s"
-        else:
-            text = f"{service_name}({service_type}) 已取消限速"
+        text = self.__format_result_lines(results)
         self.post_message(
             mtype=NotificationType.MediaServer,
             title="【播放限速】",
-            text=text,
+            text=f"{limit_type}\n{text}",
         )
+
+    @staticmethod
+    def __format_result_lines(results: List[Dict[str, Any]]) -> str:
+        lines = []
+        for result in results:
+            status = "成功" if result.get("success") else "失败"
+            lines.append(
+                f"{result.get('name')}({result.get('type')})："
+                f"上传 {result.get('upload_limit')} KB/s，"
+                f"下载保持 {result.get('download_limit')} KB/s，{status}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def __format_limit_lines(
+            services: Dict[str, ServiceInfo],
+            upload_limits: List[int],
+            download_limits: List[int],
+    ) -> str:
+        results = []
+        for index, (service_name, service) in enumerate(services.items()):
+            results.append({
+                "name": service_name,
+                "type": service.type,
+                "upload_limit": upload_limits[index],
+                "download_limit": download_limits[index],
+                "success": True,
+            })
+        return SpeedLimiter.__format_result_lines(results)
 
     def __is_unlimited_endpoint(self, endpoint: Optional[str]) -> bool:
         ipaddr = self.__endpoint_to_ip(endpoint)

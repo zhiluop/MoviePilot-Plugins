@@ -48,13 +48,14 @@
     },
     "SpeedLimiter": {
         "name": "播放限速",
-        "description": "公网播放媒体库视频时，自动对下载器进行限速；支持固定限速、按上行带宽智能计算和局域网/路径白名单。",
+        "description": "公网播放媒体库视频时，自动对下载器进行上传限速；支持固定限速、按上行带宽智能计算和局域网/路径白名单。",
         "labels": "媒体服务器,下载器",
-        "version": "3.0.0",
+        "version": "3.0.1",
         "icon": "https://raw.githubusercontent.com/zhiluop/MoviePilot-Plugins/main/icons/micon.png",
         "author": "zhiluop",
         "level": 1,
         "history": {
+            "v3.0.1": "增强播放限速日志，合并多下载器通知，改为公网播放/内网或未观看语义，并保持下载器原下载限速。",
             "v3.0.0": "重写播放限速插件，适配 MoviePilot V2 当前服务接口，增强公网客户端识别、媒体服务器会话读取和下载器限速分配。"
         },
         "v2": true
