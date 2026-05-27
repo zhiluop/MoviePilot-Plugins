@@ -18,8 +18,14 @@
 ## 企微配置IP
 自动检测动态公网IP并应用到企业微信应用可信IP  
 微信通知代理地址记得改回官方地址：https://qyapi.weixin.qq.com/ 并重启MP
-docker用户使用PW版  
-Windows用户推荐使用普通版  
+
+### Cloak版说明
+本仓库当前维护的是 **企微配置IP Cloak版**，用于适配 MoviePilot V2 新的浏览器内核。
+插件通过 MoviePilot 内置的 CloakBrowser 打开企业微信管理后台、完成扫码登录、读取登录后的 Cookie，并修改企业微信应用可信 IP。
+新版不再直接启动 Playwright Chromium，因此适合已经升级到 MoviePilot V2 新浏览器内核的环境。
+
+如果你仍在使用旧版 MoviePilot 或需要 Selenium/Playwright 旧实现，请使用原作者仓库中对应版本。
+
 [手动提取cookie流程](#手动获取cookie流程)  
 [多WAN多IP注意事项](#多wan多公网ip环境答疑)  
 [无法识别二维码登录](#无法通过识别图片二维码登录)  
