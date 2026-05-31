@@ -142,6 +142,17 @@ class FakeDownloader:
         return True
 
 
+class FakeQbittorrentDownloader(FakeDownloader):
+    def __init__(self, download_limit=2048, upload_limit=0):
+        super().__init__(download_limit=download_limit, upload_limit=upload_limit)
+        self.qbc = types.SimpleNamespace(
+            transfer=types.SimpleNamespace(
+                upload_limit=upload_limit * 1024,
+                download_limit=download_limit * 1024,
+            )
+        )
+
+
 class FakeTransmissionDownloader(FakeDownloader):
     def __init__(self, download_limit=2048, upload_limit=0, download_enabled=False):
         super().__init__(download_limit=download_limit, upload_limit=upload_limit)
@@ -153,6 +164,13 @@ class FakeTransmissionDownloader(FakeDownloader):
             "speed_limit_down": self.download_limit,
             "speed_limit_down_enabled": self.download_enabled,
         }
+
+    def set_session(self, **kwargs):
+        self.calls.append(kwargs)
+        if "speed_limit_up" in kwargs:
+            self.upload_limit = kwargs["speed_limit_up"]
+        if "speed_limit_down" in kwargs:
+            self.download_limit = kwargs["speed_limit_down"]
 
 
 def _plugin_with_services(module, services):
@@ -242,28 +260,72 @@ class SpeedLimiterBehaviorTests(unittest.TestCase):
         form_text = json.dumps(form, ensure_ascii=False)
 
         self.assertIn("公网播放上传限速", form_text)
+        self.assertIn("公网播放下载限速", form_text)
         self.assertIn("内网或未观看上传限速", form_text)
         self.assertNotIn("无公网播放", form_text)
-        self.assertNotIn("play_down_speed", defaults)
+        self.assertIn("play_down_speed", defaults)
         self.assertNotIn("noplay_down_speed", defaults)
 
-    def test_download_limit_is_preserved_when_setting_upload_limits(self):
-        first = FakeDownloader(download_limit=2048)
-        second = FakeDownloader(download_limit=4096)
+    def test_blank_download_limit_does_not_reset_qbittorrent_download_limit(self):
+        downloader = FakeQbittorrentDownloader(download_limit=2048)
         services = {
-            "qb": self.module.ServiceInfo(name="qb", instance=first, type="qbittorrent"),
-            "tr": self.module.ServiceInfo(name="tr", instance=second, type="transmission"),
+            "qb": self.module.ServiceInfo(name="qb", instance=downloader, type="qbittorrent"),
         }
         plugin = _plugin_with_services(self.module, services)
         plugin._notify = False
+        plugin._play_down_speed = None
 
         plugin._SpeedLimiter__set_limiter("公网播放", 500)
 
-        self.assertEqual(first.calls, [{"download_limit": 2048, "upload_limit": 500}])
-        self.assertEqual(second.calls, [{"download_limit": 4096, "upload_limit": 500}])
+        self.assertEqual(downloader.calls, [])
+        self.assertEqual(downloader.qbc.transfer.upload_limit, 500 * 1024)
+        self.assertEqual(downloader.qbc.transfer.download_limit, 2048 * 1024)
 
-    def test_disabled_transmission_download_limit_stays_disabled(self):
-        plugin = self.module.SpeedLimiter()
+    def test_configured_download_limit_is_set_with_upload_limit(self):
+        downloader = FakeDownloader(download_limit=2048)
+        services = {
+            "qb": self.module.ServiceInfo(name="qb", instance=downloader, type="qbittorrent"),
+        }
+        plugin = _plugin_with_services(self.module, services)
+        plugin._notify = False
+        plugin._play_down_speed = 1024
+
+        plugin._SpeedLimiter__set_limiter("公网播放", 500)
+
+        self.assertEqual(downloader.calls, [{"download_limit": 1024, "upload_limit": 500}])
+
+    def test_configured_download_limit_is_restored_after_public_playback(self):
+        downloader = FakeDownloader(download_limit=2048)
+        services = {
+            "qb": self.module.ServiceInfo(name="qb", instance=downloader, type="qbittorrent"),
+        }
+        plugin = _plugin_with_services(self.module, services)
+        plugin._notify = False
+        plugin._play_down_speed = 1024
+
+        plugin._SpeedLimiter__set_limiter("公网播放", 500)
+        plugin._SpeedLimiter__set_limiter("内网或未观看", 0)
+
+        self.assertEqual(downloader.calls, [
+            {"download_limit": 1024, "upload_limit": 500},
+            {"download_limit": 2048, "upload_limit": 0},
+        ])
+
+    def test_blank_download_limit_does_not_enable_transmission_download_limit(self):
+        plugin = _plugin_with_services(self.module, {
+            "tr": self.module.ServiceInfo(
+                name="tr",
+                instance=FakeTransmissionDownloader(download_limit=4096, download_enabled=False),
+                type="transmission",
+            )
+        })
+        plugin._notify = False
+        plugin._play_down_speed = None
+        downloader = plugin.service_infos["tr"].instance
+
+        plugin._SpeedLimiter__set_limiter("公网播放", 500)
+
+        self.assertEqual(downloader.calls, [{"speed_limit_up": 500, "speed_limit_up_enabled": True}])
         downloader = FakeTransmissionDownloader(download_limit=4096, download_enabled=False)
 
         limit = plugin._SpeedLimiter__current_download_limit(downloader, "transmission")
@@ -279,14 +341,15 @@ class SpeedLimiterBehaviorTests(unittest.TestCase):
         }
         plugin = _plugin_with_services(self.module, services)
         plugin._notify = True
+        plugin._play_down_speed = 1024
 
         plugin._SpeedLimiter__set_limiter("公网播放", 500)
 
         messages = getattr(plugin, "_posted_messages", [])
         self.assertEqual(len(messages), 1)
         text = messages[0][1]["text"]
-        self.assertIn("qb(qbittorrent)：上传 500 KB/s，下载保持 2048 KB/s", text)
-        self.assertIn("tr(transmission)：上传 500 KB/s，下载保持 4096 KB/s", text)
+        self.assertIn("qb(qbittorrent)：上传 500 KB/s，下载 1024 KB/s", text)
+        self.assertIn("tr(transmission)：上传 500 KB/s，下载 1024 KB/s", text)
 
     def test_limiter_writes_logs_for_state_changes(self):
         downloader = FakeDownloader(download_limit=2048)
