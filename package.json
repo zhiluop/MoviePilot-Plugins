@@ -27,11 +27,12 @@
         "name": "企微配置IP Cloak版",
         "description": "定时获取最新动态公网IP，配置到企业微信应用的可信IP列表里。适配MoviePilot V2 CloakBrowser内核。",
         "labels": "消息通知",
-        "version": "2.5.1",
+        "version": "2.5.2",
         "icon": "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true",
         "author": "zhiluop",
         "level": 2,
         "history": {
+            "v2.5.2": "适配MoviePilot最新CloakBrowser启动参数，增强企业微信二维码识别与保存兼容性。",
             "v2.5.1": "修复CloakBrowser扫码登录成功后未可靠捕获登录状态和读取cookie的问题。",
             "v2.5.0": "适配MoviePilot V2 CloakBrowser浏览器内核，移除直接Playwright Chromium启动依赖。",
             "v2.4.2": "修改网络超时判断机制",

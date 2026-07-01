@@ -2,7 +2,7 @@ import base64
 import re
 import os
 import time
-from urllib.parse import urljoin
+from urllib.parse import unquote_to_bytes, urljoin
 import requests
 from datetime import datetime, timedelta
 import pytz
@@ -26,7 +26,7 @@ class WeWorkIPPW(_PluginBase):
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.5.1"
+    plugin_version = "2.5.2"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -87,7 +87,12 @@ class WeWorkIPPW(_PluginBase):
 
     @staticmethod
     def _launch_browser_context(headless: bool = True):
-        context = launch_context(headless=headless, args=["--lang=zh-CN"])
+        context = launch_context(
+            headless=headless,
+            args=["--lang=zh-CN"],
+            humanize=settings.CLOAKBROWSER_HUMANIZE,
+            human_preset=settings.CLOAKBROWSER_HUMAN_PRESET,
+        )
         context.set_extra_http_headers({
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.1"
         })
@@ -104,21 +109,146 @@ class WeWorkIPPW(_PluginBase):
 
     @staticmethod
     def _get_login_qr_url(page):
-        page.wait_for_selector("iframe", timeout=5000)
-        iframe_element = page.query_selector('iframe[src*="login_qrcode"]') or page.query_selector("iframe")
-        if not iframe_element:
-            raise ValueError("未找到登录二维码iframe")
-        frame = iframe_element.content_frame()
-        if not frame:
-            raise ValueError("无法读取登录二维码iframe内容")
-        for _ in range(10):
-            qr_img_element = frame.query_selector(".qrcode_login_img")
-            if qr_img_element:
-                qr_img_relative_url = qr_img_element.get_attribute("src")
-                if qr_img_relative_url:
-                    return urljoin(page.url, qr_img_relative_url)
+        qr_selectors = [
+            ".qrcode_login_img",
+            "img.qrcode_login_img",
+            "img[src*='qrcode']",
+            "img[src*='qr']",
+            "img[src*='wwqrlogin']",
+            "img[src*='login']",
+            "canvas",
+        ]
+        iframe_selectors = [
+            'iframe[src*="login_qrcode"]',
+            'iframe[src*="wwqrlogin"]',
+            "#wx_reg iframe",
+            "iframe",
+        ]
+
+        for _ in range(40):
+            for frame in WeWorkIPPW._iter_login_frames(page, iframe_selectors):
+                qr_url = WeWorkIPPW._find_qr_url_in_frame(
+                    frame,
+                    WeWorkIPPW._safe_frame_url(frame, page.url),
+                    qr_selectors
+                )
+                if qr_url:
+                    return qr_url
             page.wait_for_timeout(500)
-        raise ValueError("未找到登录二维码图片")
+
+        diagnostics = WeWorkIPPW._qr_page_diagnostics(page, iframe_selectors)
+        raise ValueError(f"未找到登录二维码图片，页面结构: {diagnostics}")
+
+    @staticmethod
+    def _iter_login_frames(page, iframe_selectors: List[str]):
+        yielded = []
+        for selector in iframe_selectors:
+            try:
+                elements = page.query_selector_all(selector)
+            except Exception:
+                continue
+            for element in elements or []:
+                try:
+                    frame = element.content_frame()
+                except Exception:
+                    frame = None
+                if frame and frame not in yielded:
+                    yielded.append(frame)
+                    yield frame
+        if page not in yielded:
+            yield page
+
+    @staticmethod
+    def _safe_frame_url(frame, fallback_url: str) -> str:
+        try:
+            return frame.url or fallback_url
+        except Exception:
+            return fallback_url
+
+    @staticmethod
+    def _find_qr_url_in_frame(frame, base_url: str, qr_selectors: List[str]) -> Optional[str]:
+        for selector in qr_selectors:
+            try:
+                element = frame.query_selector(selector)
+            except Exception:
+                continue
+            if not element:
+                continue
+            if selector == "canvas":
+                try:
+                    data_url = element.evaluate(
+                        "(canvas) => canvas.toDataURL && canvas.toDataURL('image/png')"
+                    )
+                except Exception:
+                    data_url = ""
+                if data_url and data_url.startswith("data:image/"):
+                    return data_url
+                continue
+            qr_src = element.get_attribute("src")
+            if qr_src:
+                return urljoin(base_url, qr_src)
+        return None
+
+    @staticmethod
+    def _qr_page_diagnostics(page, iframe_selectors: List[str]) -> str:
+        details = {
+            "url": "",
+            "iframes": [],
+            "images": [],
+        }
+        try:
+            details["url"] = page.url
+        except Exception:
+            pass
+        try:
+            iframe_elements = []
+            for selector in iframe_selectors:
+                iframe_elements.extend(page.query_selector_all(selector) or [])
+            seen = set()
+            for element in iframe_elements[:8]:
+                src = element.get_attribute("src") or ""
+                if src in seen:
+                    continue
+                seen.add(src)
+                details["iframes"].append(src[:160])
+        except Exception:
+            pass
+        try:
+            for img in (page.query_selector_all("img") or [])[:12]:
+                src = img.get_attribute("src") or ""
+                if src:
+                    details["images"].append(src[:160])
+        except Exception:
+            pass
+        return str(details)
+
+    @staticmethod
+    def _save_qr_image(qr_url: str, qr_path: str) -> bool:
+        if qr_url.startswith("data:image/"):
+            try:
+                header, payload = qr_url.split(",", 1)
+                image_bytes = (
+                    base64.b64decode(payload)
+                    if ";base64" in header.lower()
+                    else unquote_to_bytes(payload)
+                )
+                with open(qr_path, "wb") as file:
+                    file.write(image_bytes)
+                return True
+            except Exception as err:
+                logger.warning(f"保存data URL二维码失败: {err}")
+                return False
+        try:
+            response = requests.get(qr_url, timeout=10)
+        except Exception as err:
+            logger.warning(f"下载二维码图片失败: {err}")
+            return False
+        if response.status_code != 200:
+            logger.warning(f"下载二维码图片失败，HTTP状态码: {response.status_code}")
+            return False
+        with open(qr_path, "wb") as file:
+            file.write(response.content)
+        return True
 
     def _is_login_success(self, page) -> bool:
         success_selectors = [
@@ -509,13 +639,10 @@ class WeWorkIPPW(_PluginBase):
                 page.goto(self._urls[0])
                 absolute_url = self._get_login_qr_url(page)
                 self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "点击扫描二维码登录企业微信",image=absolute_url,link=absolute_url,userid=self._qr_send_users)
-                response = requests.get(absolute_url)
-                if response.status_code == 200:
-                    with open(self.qr_path, "wb") as file:
-                        file.write(response.content)
+                if self._save_qr_image(absolute_url, self.qr_path):
                     logger.info("打开插件详情扫描二维码登录企业微信")
                 else:
-                    logger.info("无法下载二维码图片：", response.status_code)
+                    logger.info("无法保存二维码图片，请使用通知中的二维码链接扫码")
                 try:
                     if not self._wait_for_login_success(page):
                         raise ValueError("等待扫描超时")
