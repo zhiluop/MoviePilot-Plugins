@@ -2,11 +2,13 @@ import base64
 import re
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote_to_bytes, urljoin
 import requests
 from datetime import datetime, timedelta
 import pytz
-from typing import Any, List, Dict, Tuple, Optional
+from typing import Any, Callable, List, Dict, Tuple, Optional
 from app.core.event import eventmanager, Event
 from app.schemas.types import EventType, MessageChannel, NotificationType
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -26,7 +28,7 @@ class WeWorkIPPW(_PluginBase):
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.5.2"
+    plugin_version = "2.5.3"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -84,6 +86,35 @@ class WeWorkIPPW(_PluginBase):
     _driver = None
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
+    # CloakBrowser/Playwright同步API必须避开MoviePilot的asyncio事件循环线程
+    _browser_executor: Optional[ThreadPoolExecutor] = None
+    _browser_executor_lock = threading.RLock()
+    _browser_thread_id: Optional[int] = None
+
+    def _get_browser_executor(self) -> ThreadPoolExecutor:
+        with self._browser_executor_lock:
+            if not self._browser_executor:
+                self._browser_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="weworkippw-browser"
+                )
+            return self._browser_executor
+
+    def _run_browser_task(self, callback: Callable[..., Any], *args, **kwargs) -> Any:
+        if self._browser_thread_id == threading.get_ident():
+            return callback(*args, **kwargs)
+        executor = self._get_browser_executor()
+        future = executor.submit(self._run_browser_callback, callback, *args, **kwargs)
+        return future.result()
+
+    def _run_browser_callback(self, callback: Callable[..., Any], *args, **kwargs) -> Any:
+        self._browser_thread_id = threading.get_ident()
+        return callback(*args, **kwargs)
+
+    def _close_driver(self) -> None:
+        if self._driver:
+            self._driver.close()
+            self._driver = None
 
     @staticmethod
     def _launch_browser_context(headless: bool = True):
@@ -466,6 +497,9 @@ class WeWorkIPPW(_PluginBase):
             return "获取IP失败"
             
     def ChangeIP(self):
+        return self._run_browser_task(self._change_ip_impl)
+
+    def _change_ip_impl(self):
         logger.info("开始请求企业微信管理更改可信IP")
         if not self.check_connect():
             logger.error("网络连接失败,跳过本次更改IP")
@@ -515,6 +549,9 @@ class WeWorkIPPW(_PluginBase):
                 context.close()
     
     def refresh_cookie(self,_login=True):
+        return self._run_browser_task(self._refresh_cookie_impl, _login=_login)
+
+    def _refresh_cookie_impl(self,_login=True):
         logger.info("开始刷新企业微信缓存")
         if not self.check_connect():
             logger.error("网络连接失败,跳过本次缓存保活")
@@ -619,6 +656,9 @@ class WeWorkIPPW(_PluginBase):
                 return cookie_header
 
     def login(self):
+        return self._run_browser_task(self._login_impl)
+
+    def _login_impl(self):
         logger.info("开始登录企业微信")
         self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "开始登录企业微信",userid=self._qr_send_users)
         logger.info("进行一次缓存检测")
@@ -682,7 +722,10 @@ class WeWorkIPPW(_PluginBase):
                     func=self.refresh_cookie,
                     trigger=CronTrigger.from_crontab(self._refresh_cron),
                     name="延续企业微信cookie有效时间",
-                    id="refresh_cookie"
+                    id="refresh_cookie",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
                 )
         except Exception as err:
                 logger.error(f"定时刷新企业微信缓存任务配置错误：{err}")
@@ -696,8 +739,11 @@ class WeWorkIPPW(_PluginBase):
                     trigger="date",
                     run_date=datetime.now(tz=pytz.timezone(settings.TZ))
                     + timedelta(seconds=5),
-                    name="唤起企业微信登录"
-                    #id="wwlogin"
+                    name="唤起企业微信登录",
+                    id="wwlogin",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
                 )
         except Exception as err:
                 logger.error(f"定时唤起企业登录任务配置错误：{err}")
@@ -764,6 +810,10 @@ class WeWorkIPPW(_PluginBase):
                     run_date=datetime.now(tz=pytz.timezone(settings.TZ))
                     + timedelta(seconds=3),
                     name="登录企业微信",
+                    id="wwlogin",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
                 )
     
     def send_cookie_status(self):
@@ -1301,7 +1351,7 @@ class WeWorkIPPW(_PluginBase):
         """
         try:
             if self._driver:
-                self._driver.close()
+                self._run_browser_task(self._close_driver)
             if self._scheduler:
                 if self._scheduler.running:
                     self._scheduler.shutdown()
