@@ -28,7 +28,7 @@ class WeWorkIPPW(_PluginBase):
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.5.3"
+    plugin_version = "2.5.4"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -86,35 +86,35 @@ class WeWorkIPPW(_PluginBase):
     _driver = None
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
-    # CloakBrowser/Playwright同步API必须避开MoviePilot的asyncio事件循环线程
-    _browser_executor: Optional[ThreadPoolExecutor] = None
-    _browser_executor_lock = threading.RLock()
-    _browser_thread_id: Optional[int] = None
-
-    def _get_browser_executor(self) -> ThreadPoolExecutor:
-        with self._browser_executor_lock:
-            if not self._browser_executor:
-                self._browser_executor = ThreadPoolExecutor(
-                    max_workers=1,
-                    thread_name_prefix="weworkippw-browser"
-                )
-            return self._browser_executor
+    # CloakBrowser/Playwright同步API必须避开MoviePilot的asyncio事件循环线程。
+    # Chromium异常退出后，Playwright同步上下文可能污染当前线程；每次任务使用全新线程隔离。
+    _browser_thread_local = threading.local()
 
     def _run_browser_task(self, callback: Callable[..., Any], *args, **kwargs) -> Any:
-        if self._browser_thread_id == threading.get_ident():
+        if getattr(self._browser_thread_local, "active", False):
             return callback(*args, **kwargs)
-        executor = self._get_browser_executor()
-        future = executor.submit(self._run_browser_callback, callback, *args, **kwargs)
-        return future.result()
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="weworkippw-browser") as executor:
+            future = executor.submit(self._run_browser_callback, callback, *args, **kwargs)
+            return future.result()
 
     def _run_browser_callback(self, callback: Callable[..., Any], *args, **kwargs) -> Any:
-        self._browser_thread_id = threading.get_ident()
-        return callback(*args, **kwargs)
+        self._browser_thread_local.active = True
+        try:
+            return callback(*args, **kwargs)
+        finally:
+            self._browser_thread_local.active = False
 
     def _close_driver(self) -> None:
         if self._driver:
-            self._driver.close()
+            self._close_browser_context(self._driver)
             self._driver = None
+
+    @staticmethod
+    def _close_browser_context(context) -> None:
+        try:
+            context.close()
+        except Exception as err:
+            logger.warning(f"关闭企业微信浏览器上下文失败: {err}")
 
     @staticmethod
     def _launch_browser_context(headless: bool = True):
@@ -546,7 +546,7 @@ class WeWorkIPPW(_PluginBase):
             logger.error(f"更改可信IP失败:{e}")
         finally:
             if context:
-                context.close()
+                self._close_browser_context(context)
     
     def refresh_cookie(self,_login=True):
         return self._run_browser_task(self._refresh_cookie_impl, _login=_login)
@@ -602,7 +602,7 @@ class WeWorkIPPW(_PluginBase):
                 self.__update_config()   
         finally:
             if context:
-                context.close()
+                self._close_browser_context(context)
     
     def parse_cookie_header(self,cookie_header):
         try:
@@ -712,7 +712,7 @@ class WeWorkIPPW(_PluginBase):
                 self.login_fail()
         finally:
             if context:
-                context.close()
+                self._close_browser_context(context)
             self._driver = None
     
     def create_refresh_job(self):

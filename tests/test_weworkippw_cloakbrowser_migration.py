@@ -33,7 +33,7 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
 
         self.assertEqual(metadata["name"], "企微配置IP Cloak版")
         self.assertEqual(metadata["author"], "zhiluop")
-        self.assertEqual(metadata["version"], "2.5.3")
+        self.assertEqual(metadata["version"], "2.5.4")
         self.assertIn("CloakBrowser", metadata["description"])
         self.assertIn('plugin_name = "企微配置IP Cloak版"', self.source)
         self.assertIn('plugin_author = "zhiluop"', self.source)
@@ -63,9 +63,16 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
         self.assertIn("ThreadPoolExecutor", self.source)
         self.assertIn("thread_name_prefix=\"weworkippw-browser\"", self.source)
         self.assertIn("def _run_browser_task", self.source)
+        self.assertIn("with ThreadPoolExecutor(max_workers=1", self.source)
+        self.assertIn("threading.local()", self.source)
         self.assertIn("return self._run_browser_task(self._refresh_cookie_impl", self.source)
         self.assertIn("return self._run_browser_task(self._login_impl)", self.source)
         self.assertIn("return self._run_browser_task(self._change_ip_impl)", self.source)
+
+    def test_browser_context_close_is_guarded_after_crashes(self):
+        self.assertIn("def _close_browser_context", self.source)
+        self.assertIn("关闭企业微信浏览器上下文失败", self.source)
+        self.assertNotIn("_browser_executor:", self.source)
 
     def test_login_job_uses_stable_id_and_single_instance(self):
         self.assertIn('id="wwlogin"', self.source)
