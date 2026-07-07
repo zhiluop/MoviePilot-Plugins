@@ -33,7 +33,7 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
 
         self.assertEqual(metadata["name"], "企微配置IP Cloak版")
         self.assertEqual(metadata["author"], "zhiluop")
-        self.assertEqual(metadata["version"], "2.5.5")
+        self.assertEqual(metadata["version"], "2.5.6")
         self.assertIn("CloakBrowser", metadata["description"])
         self.assertIn('plugin_name = "企微配置IP Cloak版"', self.source)
         self.assertIn('plugin_author = "zhiluop"', self.source)
@@ -66,7 +66,7 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
         self.assertIn("with ThreadPoolExecutor(max_workers=1", self.source)
         self.assertIn("threading.local()", self.source)
         self.assertIn("return self._run_browser_task(self._refresh_cookie_impl", self.source)
-        self.assertIn("return self._run_browser_task(self._login_impl)", self.source)
+        self.assertIn("self._run_browser_task(self._login_impl,", self.source)
         self.assertIn("return self._run_browser_task(self._change_ip_impl)", self.source)
 
     def test_browser_context_close_is_guarded_after_crashes(self):
@@ -85,6 +85,25 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
         self.assertIn("replace_existing=True", self.source)
         self.assertIn("max_instances=1", self.source)
         self.assertIn("coalesce=True", self.source)
+
+    def test_manual_login_runs_without_blocking_scheduler_or_messages(self):
+        self.assertIn("def _start_login_async", self.source)
+        self.assertIn("threading.Thread(", self.source)
+        self.assertIn('name="weworkippw-login"', self.source)
+        self.assertIn("已有登录二维码等待扫码", self.source)
+        self.assertIn("self.login()", self.source)
+        self.assertNotIn("name=\"登录企业微信\"", self.source)
+
+    def test_disabled_plugin_cancels_login_and_skips_old_jobs(self):
+        self.assertIn("def _can_run_service", self.source)
+        self.assertIn("def _is_login_cancelled", self.source)
+        self.assertIn("self._service_active = False", self.source)
+        self.assertIn("self._login_cancel_event.set()", self.source)
+        self.assertIn("self._login_generation += 1", self.source)
+        self.assertIn("login_generation != self._login_generation", self.source)
+        self.assertIn("self._scheduler.shutdown(wait=False)", self.source)
+        self.assertIn("if not self._can_run_service()", self.source)
+        self.assertIn("if self._can_run_service() and self._check_cron", self.source)
 
 
 if __name__ == "__main__":

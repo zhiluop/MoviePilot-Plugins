@@ -28,7 +28,7 @@ class WeWorkIPPW(_PluginBase):
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.5.5"
+    plugin_version = "2.5.6"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -86,6 +86,12 @@ class WeWorkIPPW(_PluginBase):
     _driver = None
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
+    # 插件运行态与登录任务控制
+    _service_active = False
+    _login_thread: Optional[threading.Thread] = None
+    _login_lock = threading.RLock()
+    _login_cancel_event = threading.Event()
+    _login_generation = 0
     # CloakBrowser/Playwright同步API必须避开MoviePilot的asyncio事件循环线程。
     # Chromium异常退出后，Playwright同步上下文可能污染当前线程；每次任务使用全新线程隔离。
     _browser_thread_local = threading.local()
@@ -103,6 +109,16 @@ class WeWorkIPPW(_PluginBase):
             return callback(*args, **kwargs)
         finally:
             self._browser_thread_local.active = False
+
+    def _can_run_service(self) -> bool:
+        return bool(self._enabled and self._service_active)
+
+    def _is_login_cancelled(self, login_generation: Optional[int] = None) -> bool:
+        return (
+            self._login_cancel_event.is_set()
+            or not self._can_run_service()
+            or (login_generation is not None and login_generation != self._login_generation)
+        )
 
     def _close_driver(self) -> None:
         if self._driver:
@@ -310,7 +326,7 @@ class WeWorkIPPW(_PluginBase):
                 continue
         return False
 
-    def _handle_mobile_confirm(self, page) -> bool:
+    def _handle_mobile_confirm(self, page, login_generation: Optional[int] = None) -> bool:
         try:
             captcha_panel = page.wait_for_selector('.receive_captcha_panel', timeout=1000)
         except Exception:
@@ -321,6 +337,9 @@ class WeWorkIPPW(_PluginBase):
         logger.info("检测到登录验证，进入验证流程")
         wait_code_time = 0
         while wait_code_time <= 120:
+            if self._is_login_cancelled(login_generation):
+                logger.info("企业微信登录验证任务已取消")
+                return False
             if self._code:
                 input_element = page.locator('.inner_input')
                 input_element.type(self._code)
@@ -333,12 +352,15 @@ class WeWorkIPPW(_PluginBase):
             wait_code_time += 2
         raise ValueError("验证超时,终止本次登录")
 
-    def _wait_for_login_success(self, page, timeout: int = 90) -> bool:
+    def _wait_for_login_success(self, page, timeout: int = 90, login_generation: Optional[int] = None) -> bool:
         logger.info(f"等待用户 {timeout} 秒内扫码登录企业微信")
         for _ in range(timeout):
+            if self._is_login_cancelled(login_generation):
+                logger.info("企业微信登录任务已取消")
+                return False
             if self._is_login_success(page):
                 return True
-            if self._handle_mobile_confirm(page):
+            if self._handle_mobile_confirm(page, login_generation=login_generation):
                 return True
             page.wait_for_timeout(1000)
         return False
@@ -386,8 +408,10 @@ class WeWorkIPPW(_PluginBase):
            self._check_cron = "*/11 * * * *"
         # 停止现有任务
         self.stop_service()
+        self._service_active = bool(self._enabled or self._onlyonce)
 
-        if self._enabled or self._onlyonce:
+        if self._service_active:
+            self._login_cancel_event.clear()
             # 定时服务
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)       
             # 运行一次定时服务
@@ -441,7 +465,7 @@ class WeWorkIPPW(_PluginBase):
         """
         检测函数
         """
-        if not self._enabled:
+        if not self._can_run_service():
             logger.error("插件未开启")
             return
 
@@ -510,6 +534,9 @@ class WeWorkIPPW(_PluginBase):
             return "获取IP失败"
             
     def ChangeIP(self):
+        if not self._can_run_service():
+            logger.info("插件未启用，跳过企业微信可信IP变更")
+            return
         return self._run_browser_task(self._change_ip_impl)
 
     def _change_ip_impl(self):
@@ -562,6 +589,9 @@ class WeWorkIPPW(_PluginBase):
                 self._close_browser_context(context)
     
     def refresh_cookie(self,_login=True):
+        if not self._can_run_service():
+            logger.info("插件未启用，跳过企业微信缓存刷新")
+            return
         return self._run_browser_task(self._refresh_cookie_impl, _login=_login)
 
     def _refresh_cookie_impl(self,_login=True):
@@ -669,13 +699,53 @@ class WeWorkIPPW(_PluginBase):
                 return cookie_header
 
     def login(self):
-        return self._run_browser_task(self._login_impl)
+        self._start_login_async()
 
-    def _login_impl(self):
+    def _start_login_async(self):
+        if not self._can_run_service():
+            logger.info("插件未启用，跳过企业微信登录")
+            return
+        with self._login_lock:
+            if self._login_thread and self._login_thread.is_alive():
+                logger.info("企业微信登录任务正在进行，跳过重复触发")
+                self.post_message(
+                    channel=MessageChannel.Wechat,
+                    mtype=NotificationType.Plugin,
+                    title="企业微信登录中",
+                    text="已有登录二维码等待扫码，请先完成当前登录或等待超时。",
+                    userid=self._qr_send_users
+                )
+                return
+            self._login_cancel_event.clear()
+            self._login_generation += 1
+            login_generation = self._login_generation
+            self._login_thread = threading.Thread(
+                target=self._login_thread_entry,
+                args=(login_generation,),
+                name="weworkippw-login",
+                daemon=True
+            )
+            self._login_thread.start()
+
+    def _login_thread_entry(self, login_generation: int):
+        try:
+            self._run_browser_task(self._login_impl, login_generation=login_generation)
+        finally:
+            with self._login_lock:
+                if login_generation == self._login_generation:
+                    self._login_thread = None
+
+    def _login_impl(self, login_generation: Optional[int] = None):
+        if self._is_login_cancelled(login_generation):
+            logger.info("企业微信登录任务已取消")
+            return
         logger.info("开始登录企业微信")
         self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "开始登录企业微信",userid=self._qr_send_users)
         logger.info("进行一次缓存检测")
         self.refresh_cookie(_login = False)
+        if self._is_login_cancelled(login_generation):
+            logger.info("企业微信登录任务已取消")
+            return
         if self._cookie_valid:
             logger.info("已使用其他有效缓存,跳过登录")
             if not self._scheduler.get_job("refresh_cookie"):
@@ -697,7 +767,11 @@ class WeWorkIPPW(_PluginBase):
                 else:
                     logger.info("无法保存二维码图片，请使用通知中的二维码链接扫码")
                 try:
-                    if not self._wait_for_login_success(page):
+                    login_success = self._wait_for_login_success(page, login_generation=login_generation)
+                    if self._is_login_cancelled(login_generation):
+                        logger.info("企业微信登录任务已取消")
+                        return
+                    if not login_success:
                         raise ValueError("等待扫描超时")
                     cookies = self._context_cookies(context)
                     if not cookies:
@@ -763,6 +837,9 @@ class WeWorkIPPW(_PluginBase):
                 self.systemmessage.put(f"定时唤起企业登录配置错误：{err}")
 
     def login_fail(self):
+        if not self._can_run_service():
+            logger.info("插件未启用，跳过登录失败通知")
+            return
         self._cookie_valid = False
         if self._schedule_login:
             self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "登录失败",text = "已开启自动登录，即将开始下一轮登录。",userid=self._qr_send_users)
@@ -806,7 +883,7 @@ class WeWorkIPPW(_PluginBase):
 
     @eventmanager.register(EventType.UserMessage)
     def receive_message(self, event: Event):
-        if not self._enabled:
+        if not self._can_run_service():
             return
         text = event.event_data.get("text")
         if re.match(self._pattern, text):
@@ -817,20 +894,10 @@ class WeWorkIPPW(_PluginBase):
             if self._cookie_valid:
                 self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "缓存有效，无需登录",userid=self._qr_send_users)
                 return
-            self._scheduler.add_job(
-                    func=self.login,
-                    trigger="date",
-                    run_date=datetime.now(tz=pytz.timezone(settings.TZ))
-                    + timedelta(seconds=3),
-                    name="登录企业微信",
-                    id="wwlogin",
-                    replace_existing=True,
-                    max_instances=1,
-                    coalesce=True,
-                )
+            self.login()
     
     def send_cookie_status(self):
-        if not self._cookie_valid:
+        if self._can_run_service() and not self._cookie_valid:
             self.post_message(channel=MessageChannel.Wechat,mtype=NotificationType.Plugin,title = "企业微信Cookie失效",text = "回复下述指令唤起一次登录\n#登录企业微信",userid=self._qr_send_users)
 
     def get_state(self) -> bool:
@@ -863,7 +930,7 @@ class WeWorkIPPW(_PluginBase):
             "kwargs": {} # 定时器参数
         }]
         """
-        if self._enabled and self._check_cron:
+        if self._can_run_service() and self._check_cron:
             return [{
                 "id": "WeWorkIPPW",
                 "name": "微信应用自动配置动态公网IP",
@@ -1363,12 +1430,20 @@ class WeWorkIPPW(_PluginBase):
         退出插件
         """
         try:
-            if self._driver:
-                self._run_browser_task(self._close_driver)
+            self._service_active = False
+            self._login_cancel_event.set()
+            self._login_generation += 1
             if self._scheduler:
-                if self._scheduler.running:
-                    self._scheduler.shutdown()
+                try:
                     self._scheduler.remove_all_jobs()
+                except Exception as err:
+                    logger.warning(f"移除企业微信插件定时任务失败：{err}")
+                if self._scheduler.running:
+                    self._scheduler.shutdown(wait=False)
                 self._scheduler = None
+            if self._driver:
+                self._close_driver()
+            if os.path.exists(self.qr_path):
+                os.remove(self.qr_path)
         except Exception as e:
             logger.error("退出插件失败：%s" % str(e))
