@@ -33,7 +33,7 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
 
         self.assertEqual(metadata["name"], "企微配置IP Cloak版")
         self.assertEqual(metadata["author"], "zhiluop")
-        self.assertEqual(metadata["version"], "2.5.4")
+        self.assertEqual(metadata["version"], "2.5.5")
         self.assertIn("CloakBrowser", metadata["description"])
         self.assertIn('plugin_name = "企微配置IP Cloak版"', self.source)
         self.assertIn('plugin_author = "zhiluop"', self.source)
@@ -73,6 +73,12 @@ class WeWorkIPPWCloakBrowserMigrationTests(unittest.TestCase):
         self.assertIn("def _close_browser_context", self.source)
         self.assertIn("关闭企业微信浏览器上下文失败", self.source)
         self.assertNotIn("_browser_executor:", self.source)
+
+    def test_transient_browser_errors_do_not_invalidate_cookie(self):
+        self.assertIn("def _is_transient_browser_error", self.source)
+        self.assertIn("BrowserType.launch", self.source)
+        self.assertIn("Target page, context or browser has been closed", self.source)
+        self.assertIn("浏览器或网络临时异常，保留上次cookie状态，等待下次刷新", self.source)
 
     def test_login_job_uses_stable_id_and_single_instance(self):
         self.assertIn('id="wwlogin"', self.source)

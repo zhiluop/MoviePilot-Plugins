@@ -28,7 +28,7 @@ class WeWorkIPPW(_PluginBase):
     # 插件图标
     plugin_icon = "https://github.com/suraxiuxiu/MoviePilot-Plugins/blob/main/icons/micon.png?raw=true"
     # 插件版本
-    plugin_version = "2.5.4"
+    plugin_version = "2.5.5"
     # 插件作者
     plugin_author = "zhiluop"
     # 作者主页
@@ -115,6 +115,19 @@ class WeWorkIPPW(_PluginBase):
             context.close()
         except Exception as err:
             logger.warning(f"关闭企业微信浏览器上下文失败: {err}")
+
+    @staticmethod
+    def _is_transient_browser_error(err: Exception) -> bool:
+        error_text = str(err)
+        transient_markers = [
+            "BrowserType.launch",
+            "Target page, context or browser has been closed",
+            "Playwright Sync API inside the asyncio loop",
+            "Please use the Async API instead",
+            "SIGSEGV",
+            "Timeout",
+        ]
+        return any(marker in error_text for marker in transient_markers)
 
     @staticmethod
     def _launch_browser_context(headless: bool = True):
@@ -595,8 +608,8 @@ class WeWorkIPPW(_PluginBase):
             self.__update_config()
         except Exception as e:
                 logger.error(f"cookie校验失败:{e}") 
-                if "Timeout" in str(e):
-                    logger.info("检测可能连接超时,跳过本次刷新") 
+                if self._is_transient_browser_error(e):
+                    logger.info("浏览器或网络临时异常，保留上次cookie状态，等待下次刷新")
                 else:
                     self._cookie_valid = False
                 self.__update_config()   
